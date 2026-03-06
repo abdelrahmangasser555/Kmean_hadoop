@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kmeans-job
+spec:
+  template:
+    spec:
+      containers:
+        - name: kmeans-container
+          image: hadoop-kmeans:latest
+          imagePullPolicy: Never
+          command: ["python", "src/driver.py"]
+
+          volumeMounts:
+            - name: data-volume
+              mountPath: /app/data
+
+      restartPolicy: Never
+
+      volumes:
+        - name: data-volume
+          hostPath:
+            path: /data/kmeans
+            type: DirectoryOrCreate
+
+  backoffLimit: 2
