@@ -1,10 +1,7 @@
 import subprocess
 import shutil
 import os
-import pandas as pd
 import numpy as np
-from sklearn.datasets import load_iris
-from sklearn.metrics import adjusted_rand_score
 
 HADOOP_STREAMING = "/usr/local/hadoop/share/hadoop/tools/lib/hadoop-streaming-3.3.6.jar"
 
@@ -13,9 +10,14 @@ OUTPUT = "/projects/kmeans/output"
 
 RESULT_DIR = "results"
 
-iris = load_iris()
-true_labels = iris.target
-points = iris.data[:, [0,2]]
+# load local dataset
+points = []
+with open("data/iris.csv") as f:
+    for line in f:
+        x, y = map(float, line.strip().split(","))
+        points.append([x, y])
+
+points = np.array(points)
 
 
 def run_cmd(cmd):
@@ -23,9 +25,35 @@ def run_cmd(cmd):
     subprocess.run(cmd, shell=True, check=True)
 
 
+# -----------------------------
+# KMEANS++ INITIALIZATION
+# -----------------------------
+def kmeans_plus_plus(points, k):
+
+    centroids = []
+
+    centroids.append(points[np.random.randint(len(points))])
+
+    for _ in range(1, k):
+
+        distances = []
+
+        for p in points:
+            d = min(np.linalg.norm(p - c) for c in centroids)
+            distances.append(d ** 2)
+
+        probs = np.array(distances) / sum(distances)
+
+        idx = np.random.choice(len(points), p=probs)
+
+        centroids.append(points[idx])
+
+    return np.array(centroids)
+
+
 def convert_centroids():
 
-    with open("data/new_centroids.txt") as f, open("data/centroids.txt","w") as out:
+    with open("data/new_centroids.txt") as f, open("data/centroids.txt", "w") as out:
 
         for line in f:
             line = line.strip()
@@ -33,7 +61,7 @@ def convert_centroids():
             if not line:
                 continue
 
-            cid,x,y = line.split(",")
+            cid, x, y = line.split(",")
 
             out.write(f"{cid},{x},{y}\n")
 
@@ -52,101 +80,89 @@ def run_iteration():
     -file data/centroids.txt
     """
 
-    run_cmd("hdfs dfs -rm -r /projects/kmeans/output || true")
+    run_cmd("hdfs dfs -rm -r -f /projects/kmeans/output")
 
     run_cmd(cmd)
 
-    run_cmd("hdfs dfs -cat /projects/kmeans/output/part-00000 > data/new_centroids.txt")
+    run_cmd(
+        "hdfs dfs -cat /projects/kmeans/output/part-00000 > data/new_centroids.txt"
+    )
 
     convert_centroids()
 
 
 def run_kmeans(k):
 
-    print(f"\nRunning K={k}")
+    print(f"\n===== Running K={k} =====")
 
-    indices = np.random.choice(len(points), k, replace=False)
+    centroids = kmeans_plus_plus(points, k)
 
-    with open("data/centroids.txt","w") as f:
-        for i, idx in enumerate(indices):
-            x, y = points[idx]
+    with open("data/centroids.txt", "w") as f:
+        for i, (x, y) in enumerate(centroids):
             f.write(f"{i},{x},{y}\n")
 
     for i in range(5):
-        print("Iteration", i+1)
+        print("Iteration", i + 1)
         run_iteration()
 
     shutil.copy("data/centroids.txt", f"{RESULT_DIR}/k{k}_centroids.txt")
 
 
-def load_centroids(file):
+def simple_score(centroids):
 
-    centroids = []
-
-    with open(file) as f:
-        for line in f:
-            line=line.strip()
-
-            if not line:
-                continue
-
-            cid,x,y=line.split(",")
-
-            centroids.append([float(x),float(y)])
-
-    return np.array(centroids)
-
-
-def assign_clusters(centroids):
-
-    preds=[]
+    score = 0
 
     for p in points:
+        d = np.linalg.norm(centroids - p, axis=1)
+        score += np.min(d)
 
-        d=np.linalg.norm(centroids-p,axis=1)
-
-        preds.append(np.argmin(d))
-
-    return preds
+    return score
 
 
-def compute_ari():
+def evaluate():
 
-    rows=[]
+    results = []
 
-    for k in range(1,6):
+    for k in range(1, 6):
 
-        centroids=load_centroids(f"{RESULT_DIR}/k{k}_centroids.txt")
+        centroids = []
 
-        preds=assign_clusters(centroids)
+        with open(f"{RESULT_DIR}/k{k}_centroids.txt") as f:
+            for line in f:
+                _, x, y = line.strip().split(",")
+                centroids.append([float(x), float(y)])
 
-        ari=adjusted_rand_score(true_labels,preds)
+        centroids = np.array(centroids)
 
-        rows.append([k,ari])
+        score = simple_score(centroids)
 
-    df=pd.DataFrame(rows,columns=["K","ARI"])
+        results.append((k, score))
 
-    df.to_csv(f"{RESULT_DIR}/ari_scores.csv",index=False)
+    with open(f"{RESULT_DIR}/scores.txt", "w") as f:
 
-    best=df.loc[df["ARI"].idxmax()]
+        for k, s in results:
+            f.write(f"K={k} SCORE={s}\n")
 
-    with open(f"{RESULT_DIR}/best_k.txt","w") as f:
-        f.write(f"Best K = {int(best['K'])}\nARI = {best['ARI']}\n")
+        best = min(results, key=lambda x: x[1])
 
-    print("\nARI RESULTS")
-    print(df)
-    print("\nBest K =",int(best["K"]))
+        f.write(f"\nBEST_K={best[0]}\n")
+
+    print("\nResults:")
+    for r in results:
+        print(r)
+
+    print("\nBest K =", best[0])
 
 
 def main():
 
-    os.makedirs(RESULT_DIR,exist_ok=True)
+    os.makedirs(RESULT_DIR, exist_ok=True)
 
-    for k in range(1,6):
+    for k in range(1, 6):
         run_kmeans(k)
 
-    compute_ari()
+    evaluate()
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     main()
